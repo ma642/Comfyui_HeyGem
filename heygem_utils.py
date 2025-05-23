@@ -170,45 +170,123 @@ def start_heygem_service(volume_host_path):
 
     # 优先级 3: 如果容器不存在或直接启动失败，使用 docker-compose 创建并启动
     print(f"\nContainer '{CONTAINER_NAME}' not found or failed direct start. Using docker-compose to create and start it...")
-    print(f"Docker Compose file: {DOCKER_COMPOSE_FILE}")
-    print(f"Volume host path to use: {volume_host_path}")
-
-    env_for_subprocess = os.environ.copy()
-    env_for_subprocess[VOLUME_ENV_VAR] = volume_host_path
-
-    compose_up_command = [
-        "docker-compose",
-        "-f",
-        DOCKER_COMPOSE_FILE,
-        "up",
-        "-d"
-    ]
-
+    # --- 增加 Docker Daemon 检查逻辑 ---
+    print("\nChecking if Docker daemon is running and reachable...")
+    docker_daemon_running = False
     try:
+        # Use a simple command like 'docker info' to check if the daemon is reachable
+        # check_result=True will raise an exception if the command fails (e.g., cannot connect)
+        _run_docker_command(["docker", "info"], check_result=True)
+        docker_daemon_running = True
+        print("Docker daemon is running and reachable.")
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        # Catch specific errors indicating Docker command failed or not found.
+        print("\n--- Docker Daemon Not Running ---", file=sys.stderr)
+        print("Error: Could not connect to the Docker daemon.", file=sys.stderr)
+        print("Cannot proceed with docker-compose without a running Docker daemon.", file=sys.stderr)
+        print("\nPlease ensure the Docker daemon is running:", file=sys.stderr)
+
+        # Provide platform-specific hints
+        if sys.platform.startswith('linux'):
+            print("  - On Linux, try: 'sudo systemctl start docker' or 'sudo service docker start'", file=sys.stderr)
+        elif sys.platform == 'win32': # Running on Windows native or possibly within WSL talking to Windows Docker Desktop
+             print("  - On Windows with Docker Desktop: Ensure Docker Desktop application is running.", file=sys.stderr)
+             print("  - If running within WSL: Ensure Docker Desktop on Windows is running and WSL integration is enabled.", file=sys.stderr)
+        elif sys.platform == 'darwin': # macOS
+             print("  - On macOS: Ensure Docker Desktop application is running.", file=sys.stderr)
+        else:
+             print("  - Please consult your operating system documentation for starting the Docker service.", file=sys.stderr)
+
+        print("-----------------------------------", file=sys.stderr)
+
+        # We cannot proceed without the daemon
+        raise
+
+    # --- 结束 Docker Daemon 检查逻辑 ---
+
+    # Proceed with docker-compose ONLY if the daemon is confirmed running
+    if docker_daemon_running:
+        print(f"\nUsing docker-compose to create and start container '{CONTAINER_NAME}'...")
+        print(f"Docker Compose file: {DOCKER_COMPOSE_FILE}")
+        print(f"Volume host path to use: {volume_host_path}")
+
+        env_for_subprocess = os.environ.copy()
+        env_for_subprocess[VOLUME_ENV_VAR] = volume_host_path
+        env_for_subprocess['PWD'] = os.getcwd()
+
+        # Use "docker compose" for newer Docker versions, "docker-compose" for older
+        # Sticking to 'docker-compose' as in the original request.
+        compose_up_command = [
+            "docker-compose",
+            "-f",
+            DOCKER_COMPOSE_FILE,
+            "up",
+            "-d"
+        ]
+
+        # --- MODIFICATION STARTS HERE: Execute docker-compose command directly ---
         print(f"\nExecuting command: {' '.join(compose_up_command)}")
-        result = _run_docker_command(compose_up_command, check_result=True, env=env_for_subprocess)
-        print("\nDocker Compose Output (stdout):")
-        print(result.stdout)
-        if result.stderr:
-            print("\nDocker Compose Output (stderr):")
-            print(result.stderr)
-        
-        print(f"\nSuccessfully executed 'docker-compose up -d' for '{CONTAINER_NAME}'.")
+        print("-" * 30) # Separator to distinguish output
+        try:
+            # Execute docker-compose command using subprocess.run directly.
+            # stdout=sys.stdout and stderr=sys.stderr will stream the output
+            # directly to the console as it happens.
+            # check=True ensures that if the command fails, a CalledProcessError is raised.
+            subprocess.run(
+                compose_up_command,
+                check=True,
+                env=env_for_subprocess,
+                stdout=sys.stdout, # Stream stdout
+                stderr=sys.stderr  # Stream stderr
+            )
+            print("-" * 30) # Separator after command output
 
-        # 验证是否启动成功
-        time_sec = 0
-        while time_sec < 7200:
-            if is_docker_container_running(CONTAINER_NAME):
-                print(f"Container '{CONTAINER_NAME}' confirmed as running after direct start.")
-                return True
+            # No need to print stdout/stderr from a result object, as it was streamed live.
+            print(f"\nSuccessfully executed 'docker-compose up -d' for '{CONTAINER_NAME}'.")
 
-            print(f"Waiting for container '{CONTAINER_NAME}' to start... Downloading image and creating... ")
-            time.sleep(20) # 每10秒检查一次
-            time_sec += 20
+            # --- MODIFICATION ENDS HERE ---
 
-    except Exception:
-        print(f"\nFailed to start '{CONTAINER_NAME}' using docker-compose. Please check the logs above for details.", file=sys.stderr)
-        return False
+            # Validation check (Remains the same)
+            print(f"\nWaiting for container '{CONTAINER_NAME}' to become ready...")
+
+            wait_sec = 0
+            max_wait_sec = 60
+            wait_interval_sec = 3
+
+            while wait_sec < max_wait_sec:
+                if is_docker_container_running(CONTAINER_NAME):
+                    print(f"Container '{CONTAINER_NAME}' confirmed as running after docker-compose up.")
+                    return True
+
+                # Check container status more explicitly during wait (Use helper here as output is captured)
+                try:
+                    status_command = ["docker", "inspect", "-f", "{{.State.Status}}", CONTAINER_NAME]
+                    # Using _run_docker_command as we just need the status string
+                    status_result = _run_docker_command(status_command)
+                    status = status_result.stdout.strip()
+                    print(f"Container status: '{status}'. Waiting for 'running'... (Waited {wait_sec}/{max_wait_sec}s)")
+                except Exception:
+                    print(f"Could not inspect container status. Waiting... (Waited {wait_sec}/{max_wait_sec}s)")
+
+
+                time.sleep(wait_interval_sec)
+                wait_sec += wait_interval_sec
+
+            # Timed out (Remains the same)
+            print(f"\nError: Timed out waiting for container '{CONTAINER_NAME}' to start after docker-compose up ({max_wait_sec}s).", file=sys.stderr)
+            print("Please check container logs for details (e.g., 'docker logs {}').".format(CONTAINER_NAME), file=sys.stderr)
+            return False
+
+        except Exception: # Catch errors during the subprocess.run command itself (including CalledProcessError)
+            print(f"\nFailed to start '{CONTAINER_NAME}' using docker-compose. The command output above should provide details.", file=sys.stderr)
+            # The actual error messages from docker-compose were already streamed to stderr by subprocess.run
+            return False
+
+    else:
+         # This part is technically unreachable because we return False if the daemon check fails,
+         # but kept for logical completeness.
+         print("Skipping docker-compose up because Docker daemon is not running.", file=sys.stderr)
+         return False
 
 def _get_container_id(container_name):
     """

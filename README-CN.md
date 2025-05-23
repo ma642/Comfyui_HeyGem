@@ -29,15 +29,48 @@ git clone https://github.com/billwuhao/Comfyui_HeyGem.git
 ![](https://github.com/duixcom/Duix.Heygem/raw/main/README.assets/13.png)
 ![](https://github.com/duixcom/Duix.Heygem/raw/main/README.assets/3.png)
 
-镜像默认下载到 C 盘 (大概需要 14g 空间), 可以启动后在设置里修改为其他盘:
+镜像默认下载到 C 盘 **(大概需要 14g 空间)**, 可以在设置里修改为其他盘:
 
 ![](https://github.com/duixcom/Duix.Heygem/raw/main/README.assets/7.png)
 
-OK! 准备就绪, 第一次运行节点, 需要下载镜像, 大概 30 分钟左右, 看网速. 不复杂, 就这么简单.
+OK! 准备就绪, 每次运行节点, 先启动 docker 即可. 第一次运行节点, 需要下载镜像, 大概 30 分钟左右, 看网速. 安装不复杂, 就点击几下安装完软件即可, docker 是独立镜像环境, 不担心兼容问题, 还很少报错, 比其他插件安装还简单.
 
 - Linux (以 Ubuntu 为例):
 
-1, 安装 Docker: 
+1, 安装 Docker: 执行 `docker --version` 查看是否安装, 没有安装的, 执行下列命令安装.
+```
+sudo apt update
+sudo apt install docker.io
+sudo apt install docker-compose
+```
+
+2, 安装驱动: 执行 `nvidia-smi` 查看是否安装, 没有安装的, 参考官方文档安装 (https://www.nvidia.cn/drivers/lookup/).
+
+3, 安装 NVIDIA 容器工具包: 
+  - 添加 NVIDIA 软件包存储库：
+  ```
+  distribution=$(. /etc/os-release;echo $ID$VERSION_ID) \
+  && curl -s -L https://nvidia.github.io/libnvidia-container/gpgkey | sudo apt-key add - \
+  && curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+  ```
+
+  - 安装 NVIDIA 容器工具包：
+  ```
+  sudo apt-get update
+  sudo apt-get install -y nvidia-container-toolkit
+  ```
+
+  - 配置 NVIDIA 容器运行时：
+  ```
+  sudo nvidia-ctk runtime configure --runtime=docker
+  ```
+
+  - 重启 Docker 守护进程以应用更改：
+  ```
+  sudo systemctl restart docker
+  ```
+
+OK! 准备就绪, 第一次运行节点, 需要下载镜像, 大概 30 分钟左右, 看网速.
 
 ## 鸣谢
 
