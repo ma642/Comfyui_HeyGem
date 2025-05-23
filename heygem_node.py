@@ -64,6 +64,7 @@ class HeyGemRun:
                     {
                         "audio": ("AUDIO",),
                         "video": ("IMAGE", ),
+                        "mode": (['normal', 'pingpong', 'repeat'], {"default": "normal"}),
                      },
             "optional": {
                  "stop_heygem": ("BOOLEAN", {"default": False}),
@@ -77,19 +78,21 @@ class HeyGemRun:
 
     FUNCTION = "run"
 
-    def run(self, video, audio, fps, stop_heygem=False):
+    def run(self, video, audio, mode, fps, stop_heygem=False):
         start_heygem_service(TEMP_DIR)
-
-        taskcode = f"{uuid.uuid4()}"
-        video_path = os.path.join(TEMP_DIR, "temp", f"{taskcode}.mkv")
-        save_tensor_as_video_lossless(video, video_path, fps)
 
         audio_path = cache_audio_tensor(
             cache_dir=os.path.join(TEMP_DIR, "temp"),
             audio_tensor=audio["waveform"].squeeze(0),
             sample_rate=audio["sample_rate"]
         )
-        
+
+        duration = audio["waveform"].shape[-1] / audio["sample_rate"]
+
+        taskcode = f"{uuid.uuid4()}"
+        video_path = os.path.join(TEMP_DIR, "temp", f"{taskcode}.mkv")
+        save_tensor_as_video_lossless(video, video_path, duration, mode=mode, fps=fps)
+
         docker_video_path = os.path.join("/code/data/temp/", f"{taskcode}.mkv")
         docker_audio_path = os.path.join("/code/data/temp/", os.path.basename(audio_path))
         data = {

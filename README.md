@@ -8,6 +8,8 @@ Currently (2025.05.22) the best open-source digital human, bar none. Basically c
 
 ## 📣 Updates
 
+[2025-05-23]⚒️: Optimize CPU usage for long videos, allowing short videos to be repeated or pingPong to audio duration.
+
 [2025-05-22]⚒️: Released v1.0.0.
 
 ## Node Installation

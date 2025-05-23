@@ -334,15 +334,28 @@ def stop_heygem_service():
     except Exception as e:
         print(f"\nFailed to stop '{CONTAINER_NAME}' using 'docker stop': {e}. Please check the logs above.", file=sys.stderr)
 
-def save_tensor_as_video_lossless(image_tensor, output_path, fps=24):
+def save_tensor_as_video_lossless(image_tensor, output_path, duration, mode='normal', fps=24):
     """
     将形状为 [frames, height, width, channels] 的 PyTorch 张量保存为视频文件，
-    尝试最小化损失，特别是使用无损编码器。
+    尝试最小化损失，并根据指定的持续时间和模式调整帧序列。
 
     :param image_tensor: 形状为 [frames, height, width, channels] 的 PyTorch 张量，范围为 [0, 1]
     :param output_path: 输出视频文件路径 (建议使用 .mkv, .avi 或 .mov 扩展名以支持更多无损编码)
+    :param duration: 输出视频的持续时间（秒）。必须为正数。
+    :param mode: 视频播放模式。可选值为 'normal', 'pingpong', 'repeat'。
+                 - 'normal': 如果原始视频长度大于duration，则截断。如果小于或等于，则播放原始长度。
+                             此模式下，duration作为上限，视频不会被延长。
+                 - 'pingpong': 将视频像乒乓球一样来回播放 (frame0 -> frame1 -> ... -> last -> second_last -> ... -> frame1 -> frame0 -> ...)，
+                               直到达到指定的 duration。
+                 - 'repeat': 重复播放整个视频 (frame0 -> ... -> last -> frame0 -> ...)，直到达到指定的 duration。
     :param fps: 视频帧率
     """
+        
+    original_frames_count = image_tensor.shape[0]
+
+    # 计算目标总帧数
+    target_frames_count = int(duration * fps)
+    # --- 准备帧序列 ---
     # 确保张量在 CPU 上
     if image_tensor.is_cuda:
         tensor_np = image_tensor.cpu().numpy()
@@ -353,30 +366,71 @@ def save_tensor_as_video_lossless(image_tensor, output_path, fps=24):
     # 使用 np.round 进行四舍五入，并使用 np.clip 确保在 [0, 255] 范围内
     tensor_np = np.clip(np.round(tensor_np * 255), 0, 255).astype(np.uint8)
 
+    # 生成需要写入的帧的索引序列
+    frame_indices_to_write = []
+    original_indices = np.arange(original_frames_count)
+
+    if mode == 'repeat':
+        # 重复原始索引序列直到达到目标帧数
+        while len(frame_indices_to_write) < target_frames_count:
+            frame_indices_to_write.extend(original_indices)
+        frame_indices_to_write = frame_indices_to_write[:target_frames_count]
+
+    elif mode == 'pingpong':
+        # pingpong 序列： forward, backward (排除首尾帧避免重复)
+        forward_indices = original_indices
+        backward_indices = original_indices[-2::-1] # 从倒数第二帧到第一帧
+
+        while len(frame_indices_to_write) < target_frames_count:
+            frame_indices_to_write.extend(forward_indices)
+            frame_indices_to_write.extend(backward_indices)
+        frame_indices_to_write = frame_indices_to_write[:target_frames_count]
+
+    # 将索引列表转换为 numpy 数组，方便迭代
+    frame_indices_to_write_np = np.array(frame_indices_to_write)
+
+    # --- 视频保存部分 ---
     # 尝试使用FFV1 (无损)
     try:
-        with imageio.get_writer(output_path, fps=fps, codec='ffv1', macro_block_size=1) as writer:
-            # macro_block_size=1 可以提高编码器精确度，可能略微增大文件，但FFV1已经是无损了
-            for frame in tensor_np:
-                writer.append_data(frame)
+        # imageio 2.9.0 及更高版本可能需要 explicit 'codec' 参数
+        # macro_block_size=1 可以提高编码器精确度，可能略微增大文件，但FFV1已经是无损了
+        writer_params = {'codec': 'ffv1'}
+        if sys.version_info >= (3, 7): # macro_block_size requires Python 3.7+ for imageio 2.9+
+            # Note: macro_block_size might not be supported by all FFV1 versions or configurations
+            pass # Let's remove macro_block_size=1 as it's not a standard FFV1 option via imageio
+                 # FFV1 is inherently lossless, so this setting might not be needed or supported
+            
+        with imageio.get_writer(output_path, fps=fps, **writer_params) as writer:
+            for idx in frame_indices_to_write_np:
+                writer.append_data(tensor_np[idx])
         print(f"Successfully saved video to {output_path} using FFV1 (lossless).")
+
     except Exception as e:
         print(f"Failed to use FFV1 codec: {e}. Trying libx264 with crf=0 (lossless, but might have YUV conversion).")
         # 尝试使用 libx264, crf=0 (无损)
         try:
             # 'crf=0' 参数通过 ffmpeg_params 传递
-            # 对于某些imageio版本，可能需要显式指定像素格式
-            with imageio.get_writer(output_path, fps=fps, codec='libx264', ffmpeg_params=['-crf', '0', '-pix_fmt', 'yuv444p']) as writer:
-                for frame in tensor_np:
-                    writer.append_data(frame)
+            # '-pix_fmt yuv444p' 尝试保留更多色彩信息，避免 YUV 4:2:0 引起的色度下采样损失
+            # imageio 的 ffmpeg_params 有时需要列表形式
+            ffmpeg_params = ['-crf', '0', '-pix_fmt', 'yuv444p']
+            
+            with imageio.get_writer(output_path, fps=fps, codec='libx264', ffmpeg_params=ffmpeg_params) as writer:
+                for idx in frame_indices_to_write_np:
+                     writer.append_data(tensor_np[idx]) # libx264 需要 uint8 范围 [0, 255]
+
             print(f"Successfully saved video to {output_path} using libx264 (crf=0, lossless).")
+
         except Exception as e_h264:
-            print(f"Failed to use libx264 crf=0: {e_h264}. Falling back to default (possibly lossy).")
+            print(f"Failed to use libx264 crf=0: {e_h264}. Falling back to default (potentially lossy).")
             # 最后的退路：使用默认设置，可能会有损
-            with imageio.get_writer(output_path, fps=fps) as writer:
-                for frame in tensor_np:
-                    writer.append_data(frame)
-            print(f"Saved video to {output_path} using default imageio settings (potentially lossy).")
+            try:
+                with imageio.get_writer(output_path, fps=fps) as writer:
+                    for idx in frame_indices_to_write_np:
+                        writer.append_data(tensor_np[idx]) # 默认编码器通常也需要 uint8
+                print(f"Saved video to {output_path} using default imageio settings (potentially lossy).")
+            except Exception as e_default:
+                 print(f"Failed even with default settings: {e_default}")
+                 print("Video saving failed.")
 
 # def save_tensor_as_image_sequence(image_tensor, output_dir, filename_prefix="frame", fps=24):
 #     """
@@ -436,26 +490,139 @@ def save_tensor_as_video_lossless(image_tensor, output_path, fps=24):
 #     return tensor
 
 def video_to_tensor(video_path):
-    """
-    将本地视频文件转换为形状为 [frames, height, width, channels] 的 PyTorch 张量，
-    范围为 [0, 1]。
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"视频文件未找到: {video_path}")
 
-    :param video_path: 本地视频文件路径
-    :return: 形状为 [frames, height, width, channels] 的 PyTorch 张量
-    """
-    # 使用 imageio 读取视频文件
-    reader = imageio.get_reader(video_path)
+    print(f"Attempting to load video: {video_path}")
 
-    frames = []
-    for frame in reader:
-        # 将每一帧从 uint8 类型转换为 float32 类型，并归一化到 [0, 1] 范围
-        frame_normalized = (frame.astype(np.float32) / 255.0)
-        frames.append(frame_normalized)
+    reader = None # Initialize reader to None for error handling
+    try:
+        # 使用 imageio 读取视频文件
+        reader = imageio.get_reader(video_path)
+        meta = reader.get_meta_data()
 
-    # 将列表转换为 NumPy 数组
-    frames_np = np.stack(frames, axis=0)
+        width, height = meta['size']
+        # 这里简化为只处理常见的RGB 3通道情况。
+        channels = 3
+        print(f"Video metadata: {meta.get('nframes', 'unknown')} frames, {width}x{height}, fps={meta.get('fps')}")
 
-    # 将 NumPy 数组转换为 PyTorch 张量
-    tensor = torch.tensor(frames_np, dtype=torch.float32)
+        # 这个生成器应该逐帧读取原始 uint8 数据，并将其转换为 float32 [0, 1]
+        def frame_processor_generator(imgio_reader, expected_shape):
+            """Generator to read, process, and yield frames as float32 [0, 1]."""
+            for i, frame in enumerate(imgio_reader):
+                # Ensure frame is RGB if it was RGBA (common from imageio)
+                if frame.shape[-1] == 4 and expected_shape[-1] == 3:
+                     frame = frame[:, :, :3]
+                # Basic shape check
+                if frame.shape != expected_shape:
+                    print(f"Warning: Frame {i} has unexpected shape {frame.shape}. Expected {expected_shape}. Skipping.")
+                    continue
 
-    return tensor
+                # Convert uint8 frame to float32 [0, 1]
+                # Use .copy() for safety with np.fromiter/torch.from_numpy
+                frame_processed = (frame.astype(np.float32) / 255.0)
+
+                yield frame_processed # Yield the processed numpy array
+
+        # 这里的 expected_shape 是单帧的 shape (height, width, channels)
+        frame_shape = (height, width, channels)
+        gen_instance = frame_processor_generator(reader, frame_shape)
+
+        # 使用 np.fromiter 收集所有生成器产生的帧到 NumPy 数组
+        # 这是一个主要的内存消耗点，它会尝试将所有帧一次性放入内存
+        # dtype 参数定义了生成器yielding的元素的类型和形状
+        # 需要捕获 StopIteration 异常，因为 fromiter 会耗尽生成器
+        frames_np_flat = np.fromiter(
+            gen_instance,
+            # Define the dtype for each yielded item: float32, shape (height, width, channels)
+            # np.dtype expects shape in (row, col, channel) or similar format, matching frame_processed shape
+            np.dtype((np.float32, frame_shape))
+        )
+
+        # np.fromiter with a structured dtype like this results in a 1D array where each element is a "view"
+        # of the structured type. We need to reshape it into the desired [frames, height, width, channels]
+        num_loaded_frames = len(frames_np_flat)
+
+        if num_loaded_frames == 0:
+            reader.close()
+            raise RuntimeError(f"Failed to load any frames from video '{video_path}'. Check video file.")
+
+        # --- Implementation ---
+
+        # 1. Reader and metadata
+        # Done above.
+
+        # 2. Generator function
+        # Defined frame_processor_generator above.
+
+        # 3. Instantiate generator and call np.fromiter
+        frame_shape = (height, width, channels)
+        gen_instance = frame_processor_generator(reader, frame_shape)
+
+        print("Reading frames using generator and np.fromiter...")
+        # This line collects all yielded items until StopIteration from the generator
+        # and puts them into a 1D numpy array with the specified compound dtype.
+        frames_structured_np = np.fromiter(
+            gen_instance,
+            dtype=np.dtype((np.float32, frame_shape))
+        )
+        print(f"Finished reading frames. Structured numpy array shape: {frames_structured_np.shape}, dtype: {frames_structured_np.dtype}")
+
+        num_loaded_frames = len(frames_structured_np)
+
+        if num_loaded_frames == 0:
+            reader.close()
+            raise RuntimeError(f"Failed to load any frames from video '{video_path}'. Check video file or its content.")
+
+        # 4. Convert the 1D structured numpy array to a multi-dimensional array
+        # This step is necessary because torch.from_numpy doesn't directly convert
+        # a 1D array of compound dtypes into a multi-dimensional tensor in the way needed.
+        # We view the underlying data as float32 scalars and reshape.
+        # Total number of scalars = num_loaded_frames * height * width * channels
+        total_scalars = num_loaded_frames * height * width * channels
+        try:
+            # Check if the total number of elements in the structured array matches the expected number of scalars
+            if frames_structured_np.size * frames_structured_np.dtype.itemsize != total_scalars * np.dtype(np.float32).itemsize:
+                 # This check is a bit complex and might not be strictly needed if view works correctly.
+                 # The view operation directly reinterprets the memory.
+                 pass # Skip complex size check for now, rely on reshape
+
+            # Reshape the view of the data buffer
+            frames_np = frames_structured_np.view(np.float32).reshape(-1, height, width, channels)
+            print(f"Reshaped numpy array shape: {frames_np.shape}, dtype: {frames_np.dtype}")
+
+        except Exception as reshape_e:
+            print(f"Error reshaping numpy array after fromiter: {reshape_e}")
+            reader.close()
+            raise RuntimeError(f"Failed to reshape frame data loaded from '{video_path}'. Likely mismatch in expected frame dimensions or data.") from reshape_e
+
+
+        # 5. 将 NumPy 数组转换为 PyTorch 张量
+        # This is the second major memory allocation step.
+        print("Converting numpy array to torch tensor...")
+        try:
+            # The numpy array is already float32 [0, 1], so convert directly
+            tensor = torch.from_numpy(frames_np)
+            print("Tensor conversion successful.")
+        except Exception as tensor_e:
+            print(f"Error converting numpy array to torch tensor: {tensor_e}")
+            # This is where the original OOM error likely occurred, if the reshape step didn't already fail
+            reader.close()
+            raise RuntimeError(f"Failed to convert numpy array to torch tensor for '{video_path}'. Likely out of memory.") from tensor_e
+
+        # 6. Close the reader
+        reader.close()
+
+        print(f"Successfully loaded video '{video_path}' into tensor with shape {tensor.shape}.")
+        return tensor
+
+    except Exception as e:
+        # Catch potential errors during get_reader or get_meta_data, or any unhandled exceptions above
+        print(f"An error occurred during video loading for '{video_path}': {e}")
+        # Ensure the reader is closed if it was successfully opened before an error occurred
+        if reader is not None:
+             try:
+                 reader.close()
+             except Exception:
+                 pass # Ignore errors during closing
+        raise # Re-raise the original exception
