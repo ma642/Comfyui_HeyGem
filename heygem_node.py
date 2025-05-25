@@ -12,13 +12,13 @@ from tqdm import tqdm
 from .heygem_utils import (
     start_heygem_service, 
     stop_heygem_service,
-    save_tensor_as_video_lossless,
+    process_tensor_by_duration,
+    save_tensor_as_video,
     video_to_tensor
     )
 import folder_paths
 temp_dir = folder_paths.get_temp_directory()
 
-# 创建保存文件的临时目录
 TEMP_DIR = os.path.join(temp_dir, 'heygem')
 os.makedirs(os.path.join(TEMP_DIR, 'temp'), exist_ok=True)
 
@@ -64,7 +64,7 @@ class HeyGemRun:
                     {
                         "audio": ("AUDIO",),
                         "video": ("IMAGE", ),
-                        "mode": (['normal', 'pingpong', 'repeat'], {"default": "normal"}),
+                        "mode": (['pingpong', 'repeat'], {"default": "pingpong"}),
                      },
             "optional": {
                  "stop_heygem": ("BOOLEAN", {"default": False}),
@@ -91,7 +91,9 @@ class HeyGemRun:
 
         taskcode = f"{uuid.uuid4()}"
         video_path = os.path.join(TEMP_DIR, "temp", f"{taskcode}.mkv")
-        save_tensor_as_video_lossless(video, video_path, duration, mode=mode, fps=fps)
+
+        processed_tensor = process_tensor_by_duration(video, duration, mode, fps)
+        save_tensor_as_video(processed_tensor, video_path, fps)
 
         docker_video_path = os.path.join("/code/data/temp/", f"{taskcode}.mkv")
         docker_audio_path = os.path.join("/code/data/temp/", os.path.basename(audio_path))
