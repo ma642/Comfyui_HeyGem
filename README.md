@@ -2,7 +2,7 @@
 
 # HeyGem Digital Human Node for ComfyUI
 
-Currently (2025.05.22) the best open-source digital human, bar none. Basically capable of generating full-body, dynamic, and arbitrary resolution digital humans.
+Currently (2025.05.22) the best open-source digital human, bar none. Basically capable of generating full-body, dynamic, and arbitrary resolution digital humans. **The input video frame rate should be consistent with the synthesized frame rate.**
 
 ![image](https://github.com/billwuhao/Comfyui_HeyGem/blob/main/images/2025-05-22_22-41-52.png)
 
