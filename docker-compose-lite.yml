@@ -10,7 +10,8 @@ services:
     runtime: nvidia
     privileged: true
     volumes:
-      - ${HEGEM_FACE2FACE_DATA_PATH}:/code/data
+      #- ${HEGEM_FACE2FACE_DATA_PATH}:/code/data
+      - ~/heygem_data/face2face:/code/data
     environment:
       - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
     deploy:
